@@ -11,7 +11,7 @@ vi.mock("../gateway/call.js", () => ({
   callGateway: (...args: unknown[]) => callGatewayMock(...args),
 }));
 
-import { requestHookApproval, requestPluginApproval } from "./hook-approval.js";
+import { requestPluginApproval, requestSingleHookApproval } from "./hook-approval.js";
 import { PluginApprovalResolutions } from "./hook-types.js";
 
 describe("requestPluginApproval", () => {
@@ -66,7 +66,7 @@ describe("requestPluginApproval", () => {
       throw new Error(`unexpected method ${String(opts.method)}`);
     });
 
-    const result = await requestHookApproval({
+    const result = await requestSingleHookApproval({
       hookPoint: "llm_message_end",
       pluginId: "confirm-before-run",
       decision: {

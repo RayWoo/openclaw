@@ -22,7 +22,7 @@ import { formatErrorMessage } from "../../../infra/errors.js";
 import { resolveHeartbeatSummaryForAgent } from "../../../infra/heartbeat-summary.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
-import { requestHookApproval } from "../../../plugins/hook-approval.js";
+import { requestSingleHookApproval } from "../../../plugins/hook-approval.js";
 import {
   DEFAULT_BLOCK_MAX_RETRIES,
   type HookDecisionAsk,
@@ -2237,7 +2237,7 @@ export async function runEmbeddedAttempt(
             ask.denialMessage ?? "Request denied by owner.";
           let replacement: string | undefined;
           if (decision.outcome === "ask") {
-            const approval = await requestHookApproval({
+            const approval = await requestSingleHookApproval({
               hookPoint: "llm_message_end",
               decision,
               pluginId,
@@ -2708,7 +2708,7 @@ export async function runEmbeddedAttempt(
                 log.warn(
                   `before_agent_run hook requesting approval (${beforeRunPluginId}): ${beforeRunDecision.reason}`,
                 );
-                const approvalResult = await requestHookApproval({
+                const approvalResult = await requestSingleHookApproval({
                   hookPoint: "before_agent_run",
                   decision: beforeRunDecision,
                   pluginId: beforeRunPluginId,

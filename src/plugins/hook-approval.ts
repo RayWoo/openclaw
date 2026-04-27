@@ -37,7 +37,7 @@ export type RequestPluginApprovalParams = {
   logLabel?: string;
 };
 
-export type HookApprovalParams = {
+export type SingleHookApprovalParams = {
   hookPoint: string;
   decision: HookDecisionAsk;
   pluginId?: string;
@@ -49,10 +49,13 @@ export type HookApprovalParams = {
 };
 
 /**
- * Request human approval for a gate hook decision.
+ * Request human approval for one hook decision.
+ * Hook approvals intentionally do not grant durable "allow always" trust.
  * On timeout, the caller applies the hook's timeout behavior.
  */
-export async function requestHookApproval(params: HookApprovalParams): Promise<HookApprovalResult> {
+export async function requestSingleHookApproval(
+  params: SingleHookApprovalParams,
+): Promise<HookApprovalResult> {
   const result = await requestPluginApproval({
     pluginId: params.pluginId ?? `hook:${params.hookPoint}`,
     title: params.decision.title,
