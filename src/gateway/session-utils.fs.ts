@@ -90,6 +90,123 @@ export function attachOpenClawTranscriptMeta(
   };
 }
 
+type ParsedTranscriptMessageEntry = {
+  kind: "message";
+  id?: string;
+  hasParentId: boolean;
+  parentId?: string;
+  message: unknown;
+  originalBlockedContent?: Record<string, unknown>;
+};
+
+type ParsedTranscriptEntry =
+  | ParsedTranscriptMessageEntry
+  | {
+      kind: "compaction";
+      id?: string;
+      timestamp?: string;
+    }
+  | { kind: "other" };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseTranscriptEntry(value: unknown): ParsedTranscriptEntry {
+  if (!isRecord(value)) {
+    return { kind: "other" };
+  }
+
+  if (value.message) {
+    return {
+      kind: "message",
+      id: typeof value.id === "string" ? value.id : undefined,
+      hasParentId: "parentId" in value,
+      parentId: typeof value.parentId === "string" ? value.parentId : undefined,
+      message: value.message,
+      originalBlockedContent: isRecord(value.originalBlockedContent)
+        ? value.originalBlockedContent
+        : undefined,
+    };
+  }
+
+  if (value.type === "compaction") {
+    return {
+      kind: "compaction",
+      id: typeof value.id === "string" ? value.id : undefined,
+      timestamp: typeof value.timestamp === "string" ? value.timestamp : undefined,
+    };
+  }
+
+  return { kind: "other" };
+}
+
+function readTranscriptEntries(filePath: string): ParsedTranscriptEntry[] {
+  const entries: ParsedTranscriptEntry[] = [];
+  const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      entries.push(parseTranscriptEntry(JSON.parse(line)));
+    } catch {
+      // ignore bad lines
+    }
+  }
+  return entries;
+}
+
+function findActiveMessageIds(entries: ParsedTranscriptEntry[]): Set<string> | undefined {
+  const messageEntries = entries.filter(
+    (entry): entry is ParsedTranscriptMessageEntry => entry.kind === "message",
+  );
+  const hasTreeMessages =
+    messageEntries.length > 0 &&
+    messageEntries.every((entry) => entry.id !== undefined && entry.hasParentId);
+  if (!hasTreeMessages) {
+    return undefined;
+  }
+
+  const entriesById = new Map<string, ParsedTranscriptMessageEntry>();
+  for (const entry of messageEntries) {
+    if (entry.id && entry.id.length > 0) {
+      entriesById.set(entry.id, entry);
+    }
+  }
+
+  const leaf = messageEntries.toReversed().find((entry) => entry.id && entry.id.length > 0)?.id;
+  if (!leaf) {
+    return undefined;
+  }
+
+  const activeEntryIds = new Set<string>();
+  let next: string | undefined = leaf;
+  while (next && !activeEntryIds.has(next)) {
+    activeEntryIds.add(next);
+    next = entriesById.get(next)?.parentId;
+  }
+  return activeEntryIds;
+}
+
+function createCompactionTranscriptMessage(
+  entry: Extract<ParsedTranscriptEntry, { kind: "compaction" }>,
+  seq: number,
+): unknown {
+  const ts = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
+  const timestamp = Number.isFinite(ts) ? ts : Date.now();
+  return {
+    role: "system",
+    content: [{ type: "text", text: "Compaction" }],
+    timestamp,
+    __openclaw: {
+      kind: "compaction",
+      id: entry.id,
+      seq,
+    },
+  };
+}
+
 export function readSessionMessages(
   sessionId: string,
   storePath: string | undefined,
@@ -102,89 +219,24 @@ export function readSessionMessages(
     return [];
   }
 
-  const parsedEntries: unknown[] = [];
-  const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
-  for (const line of lines) {
-    if (!line.trim()) {
-      continue;
-    }
-    try {
-      parsedEntries.push(JSON.parse(line));
-    } catch {
-      // ignore bad lines
-    }
-  }
-
-  const messageEntries = parsedEntries.filter(
-    (entry) =>
-      entry &&
-      typeof entry === "object" &&
-      !Array.isArray(entry) &&
-      (entry as { message?: unknown }).message,
-  );
-  const hasTreeMessages =
-    messageEntries.length > 0 &&
-    messageEntries.every(
-      (entry) =>
-        typeof (entry as { id?: unknown }).id === "string" &&
-        "parentId" in (entry as Record<string, unknown>),
-    );
-  let activeEntryIds: Set<string> | undefined;
-  if (hasTreeMessages) {
-    const entriesById = new Map<string, unknown>();
-    for (const entry of parsedEntries) {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-        continue;
-      }
-      const id = (entry as { id?: unknown }).id;
-      if (typeof id === "string" && id.length > 0) {
-        entriesById.set(id, entry);
-      }
-    }
-    const leaf = [...entriesById.keys()].at(-1);
-    if (leaf) {
-      activeEntryIds = new Set<string>();
-      let next: string | undefined = leaf;
-      while (next && !activeEntryIds.has(next)) {
-        activeEntryIds.add(next);
-        const entry = entriesById.get(next);
-        const parentId =
-          entry && typeof entry === "object" && !Array.isArray(entry)
-            ? (entry as { parentId?: unknown }).parentId
-            : undefined;
-        next = typeof parentId === "string" && parentId.length > 0 ? parentId : undefined;
-      }
-    }
-  }
-
+  const entries = readTranscriptEntries(filePath);
+  const activeEntryIds = findActiveMessageIds(entries);
   const messages: unknown[] = [];
   let messageSeq = 0;
-  for (const parsed of parsedEntries) {
-    if (activeEntryIds && (parsed as { message?: unknown })?.message) {
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+
+  for (const entry of entries) {
+    if (entry.kind === "message") {
+      if (activeEntryIds && (!entry.id || !activeEntryIds.has(entry.id))) {
         continue;
       }
-      const id = (parsed as { id?: unknown }).id;
-      if (typeof id !== "string" || !activeEntryIds.has(id)) {
-        continue;
-      }
-    }
-    if ((parsed as { message?: unknown })?.message) {
       messageSeq += 1;
-      const originalBlocked =
-        (parsed as { originalBlockedContent?: unknown }).originalBlockedContent &&
-        typeof (parsed as { originalBlockedContent?: unknown }).originalBlockedContent ===
-          "object" &&
-        !Array.isArray((parsed as { originalBlockedContent?: unknown }).originalBlockedContent)
-          ? (parsed as { originalBlockedContent: Record<string, unknown> }).originalBlockedContent
-          : undefined;
       messages.push(
-        attachOpenClawTranscriptMeta((parsed as { message: unknown }).message, {
-          ...(typeof (parsed as { id?: unknown }).id === "string"
-            ? { id: (parsed as { id: string }).id }
-            : {}),
+        attachOpenClawTranscriptMeta(entry.message, {
+          ...(entry.id !== undefined ? { id: entry.id } : {}),
           seq: messageSeq,
-          ...(originalBlocked ? { originalBlockedContent: originalBlocked } : {}),
+          ...(entry.originalBlockedContent
+            ? { originalBlockedContent: entry.originalBlockedContent }
+            : {}),
         }),
       );
       continue;
@@ -192,24 +244,9 @@ export function readSessionMessages(
 
     // Compaction entries are not "message" records, but they're useful context for debugging.
     // Emit a lightweight synthetic message that the Web UI can render as a divider.
-    if ((parsed as { type?: unknown })?.type === "compaction") {
-      const timestampRaw = (parsed as { timestamp?: unknown }).timestamp;
-      const ts = typeof timestampRaw === "string" ? Date.parse(timestampRaw) : Number.NaN;
-      const timestamp = Number.isFinite(ts) ? ts : Date.now();
+    if (entry.kind === "compaction") {
       messageSeq += 1;
-      messages.push({
-        role: "system",
-        content: [{ type: "text", text: "Compaction" }],
-        timestamp,
-        __openclaw: {
-          kind: "compaction",
-          id:
-            typeof (parsed as { id?: unknown }).id === "string"
-              ? (parsed as { id: string }).id
-              : undefined,
-          seq: messageSeq,
-        },
-      });
+      messages.push(createCompactionTranscriptMessage(entry, messageSeq));
     }
   }
   return messages;
